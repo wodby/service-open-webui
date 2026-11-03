@@ -1,0 +1,234 @@
+name: open-webui
+icon: open-webui
+type: service
+title: Open WebUI
+guidance: GUIDANCE.md
+
+options:
+- version: '0.13'
+  tag: v0.13.0
+  default: true
+
+labels:
+- open-webui
+
+# One replica: several need pgvector, Redis and shared file storage, and the
+# old and new versions must never run against the same database at once.
+deployment:
+  strategy: rolling
+  shutdownGracePeriod: 30s
+
+endpoints:
+- name: http
+  ports:
+  - name: http
+    number: 8080
+    protocol: http
+    main: true
+    # Answers stream for as long as the model writes. A request body limit would
+    # buffer every request in the gateway and break the WebSocket connection.
+    routeDefaults:
+      https_redirect: 'true'
+      request_timeout: 0s
+      backend_request_timeout: 0s
+
+links:
+- name: postgres
+  title: PostgreSQL
+  required: true
+  selectors:
+  - type: db
+    labels:
+    - postgres
+  env:
+  - name: DATABASE_URL
+    value: '{{link.database.url}}'
+    secret: true
+# Open WebUI saves connections to its database on the first start; later
+# changes to these variables apply only together with RESET_CONFIG_ON_START.
+- name: openai
+  title: OpenAI-compatible API
+  selectors:
+  - type: service
+    labels:
+    - openai-compatible
+  env:
+  - name: OPENAI_API_BASE_URL
+    value: 'http://{{link.host}}:{{link.port}}/v1'
+  - name: OPENAI_API_KEY
+    value: '{{link.tokens.api_key}}'
+    secret: true
+
+tokens:
+- name: secret_key
+  generate:
+    regex: '[a-zA-Z0-9]{48}'
+
+# Without an administrator from the first start, whoever opens the site first
+# becomes its administrator.
+settings:
+- name: admin-email
+  title: Admin email
+  description: Email address the Open WebUI administrator signs in with. The account is created on the first start, and public sign-up is then turned off.
+  required: true
+  var: WEBUI_ADMIN_EMAIL
+- name: admin-password
+  title: Admin password
+  description: Password of the Open WebUI administrator created on the first start. Later changes are made in Open WebUI.
+  required: true
+  secret: true
+  var: WEBUI_ADMIN_PASSWORD
+
+env:
+- name: WEBUI_SECRET_KEY
+  value: '{{secret_key}}'
+  secret: true
+- name: WEBUI_URL
+  value: '{{service.primaryURL}}'
+- name: DATA_DIR
+  value: /data
+- name: HOME
+  value: /data/home
+# The image's model cache is writable only by root. The container command copies
+# it to the volume, where Hugging Face can write its lock files and new models.
+- name: HF_HOME
+  value: /data/cache/embedding/models
+- name: SENTENCE_TRANSFORMERS_HOME
+  value: /data/cache/embedding/models
+- name: WHISPER_MODEL_DIR
+  value: /data/cache/whisper/models
+- name: TIKTOKEN_CACHE_DIR
+  value: /data/cache/tiktoken
+# Use the models that ship with the image instead of asking Hugging Face for
+# updates on every start.
+- name: RAG_EMBEDDING_MODEL_AUTO_UPDATE
+  value: 'false'
+- name: RAG_RERANKING_MODEL_AUTO_UPDATE
+  value: 'false'
+# No Ollama service in the catalog; enabled, it polls an address that doesn't exist.
+- name: ENABLE_OLLAMA_API
+  value: 'false'
+
+volumes:
+- name: data
+  title: Open WebUI data
+  size: 10
+  helm:
+    labels: persistence.labels
+    values:
+    - name: persistence.enabled
+      value: true
+    - name: persistence.size
+      value: '{{volumes.data.size}}Gi'
+    - name: persistence.storageClass
+      value: '{{volumes.data.storageClassName}}'
+
+helm:
+  name: wodby
+  source: oci://registry-1.docker.io/wodby/stateful
+  chart: oci://registry-1.docker.io/wodby/stateful
+  version: 0.2.0
+  valueMappings:
+    replicas: replicaCount
+    serviceAccountName: serviceAccount.name
+    serviceAccountCreate: serviceAccount.create
+  values:
+  - name: containerName
+    value: open-webui
+  - name: containerPorts
+    value:
+    - name: http
+      containerPort: 8080
+      protocol: TCP
+  - name: serviceAccount.automount
+    value: false
+  # The image runs as root and gives group 0 write access to the files it
+  # updates at startup, so a non-root user in group 0 can run it.
+  - name: podSecurityContext
+    value:
+      fsGroup: 0
+      fsGroupChangePolicy: OnRootMismatch
+  - name: securityContext
+    value:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+        - ALL
+      runAsGroup: 0
+      runAsNonRoot: true
+      runAsUser: 2000
+  - name: persistence.mountPath
+    value: /data
+  # Only routed hosts may open the WebSocket and call the API from a browser;
+  # an explicit CORS_ALLOW_ORIGIN variable wins. New files of the image's model
+  # cache are copied to the volume, existing ones are kept.
+  - name: command
+    value:
+    - bash
+    - -ec
+  - name: args
+    value:
+    - |
+      if [ -z "${CORS_ALLOW_ORIGIN:-}" ] && [ -n "${WODBY_HOSTS:-}" ]; then
+        CORS_ALLOW_ORIGIN="$(python3 -c 'import json, os; print(";".join(f"{s}://{h}" for h in json.loads(os.environ["WODBY_HOSTS"]) for s in ("https", "http")))')"
+        if [ -n "$CORS_ALLOW_ORIGIN" ]; then export CORS_ALLOW_ORIGIN; else unset CORS_ALLOW_ORIGIN; fi
+      fi
+      mkdir -p "$HOME" "$DATA_DIR/cache"
+      if [ -d /app/backend/data/cache ]; then cp -R --update=none /app/backend/data/cache/. "$DATA_DIR/cache/"; fi
+      exec bash start.sh
+  - name: startupProbe
+    value:
+      httpGet:
+        path: /health
+        port: http
+      failureThreshold: 60
+      periodSeconds: 10
+      timeoutSeconds: 5
+  - name: readinessProbe
+    value:
+      httpGet:
+        path: /ready
+        port: http
+      failureThreshold: 3
+      periodSeconds: 10
+      timeoutSeconds: 5
+  - name: livenessProbe
+    value:
+      httpGet:
+        path: /health
+        port: http
+      failureThreshold: 6
+      periodSeconds: 10
+      timeoutSeconds: 5
+
+workloads:
+- name: main
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: '{{helm.release}}'
+  kind: statefulset
+  primary: true
+  helm:
+    labels: commonLabels
+    annotations: commonAnnotations
+    volumes: extraVolumes
+  containers:
+  - name: open-webui
+    image: ghcr.io/open-webui/open-webui
+    routeMetadata: true
+    resources:
+      request:
+        cpu: 500
+        memory: 1536
+      limit:
+        cpu: 2000
+        memory: 4096
+    helm:
+      resources: resources
+      env: envVars
+      mounts: extraVolumeMounts
+      image:
+        repository: image.repository
+        tag: image.tag
+        registry: image.registry
+        pullPolicy: image.pullPolicy
