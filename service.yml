@@ -6,7 +6,7 @@ guidance: GUIDANCE.md
 
 options:
 - version: '0.13'
-  tag: v0.13.0
+  tag: v0.13.3
   default: true
 
 labels:
@@ -69,12 +69,15 @@ tokens:
 settings:
 - name: admin-email
   title: Admin email
-  description: Email address the Open WebUI administrator signs in with. The account is created on the first start, and public sign-up is then turned off.
+  description: Email address the Open WebUI administrator signs in with. The 
+    account is created on the first start, and public sign-up is then turned 
+    off.
   required: true
   var: WEBUI_ADMIN_EMAIL
 - name: admin-password
   title: Admin password
-  description: Password of the Open WebUI administrator created on the first start. Later changes are made in Open WebUI.
+  description: Password of the Open WebUI administrator created on the first 
+    start. Later changes are made in Open WebUI.
   required: true
   secret: true
   var: WEBUI_ADMIN_PASSWORD
