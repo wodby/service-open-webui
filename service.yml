@@ -6,7 +6,7 @@ guidance: GUIDANCE.md
 
 options:
 - version: '0.13'
-  tag: v0.13.3
+  tag: v0.13.4
   default: true
 
 labels:
